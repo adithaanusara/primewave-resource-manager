@@ -1,0 +1,148 @@
+// Resource Reservation Management System — data model.
+//
+// Some rules cannot be expressed in the Prisma schema and are enforced by raw SQL
+// in prisma/migrations (see the init migration):
+//   - reservations.ends_at must be after reservations.starts_at
+//   - two active reservations for the same resource can never overlap in time
+//   - resources.capacity, when set, must be positive
+
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum UserRole {
+  ADMIN // manages resources, categories, teams and reviews reservation requests
+  MEMBER // browses availability and makes reservations
+}
+
+enum ResourceStatus {
+  ACTIVE // can be reserved
+  MAINTENANCE // temporarily out of service, not reservable
+  RETIRED // permanently withdrawn, kept only for history
+}
+
+enum ReservationStatus {
+  PENDING // awaiting approval; already holds the time slot
+  CONFIRMED // approved, or booked on a resource that needs no approval
+  REJECTED // declined by an admin; frees the time slot
+  CANCELLED // withdrawn by the requester or an admin; frees the time slot
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  name         String
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  role         UserRole @default(MEMBER)
+  // Users are deactivated rather than deleted so reservation history stays intact.
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  teams                TeamMember[]
+  reservations         Reservation[] @relation("ReservationRequester")
+  reviewedReservations Reservation[] @relation("ReservationReviewer")
+
+  @@map("users")
+}
+
+model Team {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String   @unique
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  members      TeamMember[]
+  reservations Reservation[]
+
+  @@map("teams")
+}
+
+model TeamMember {
+  teamId   String   @map("team_id") @db.Uuid
+  userId   String   @map("user_id") @db.Uuid
+  joinedAt DateTime @default(now()) @map("joined_at") @db.Timestamptz(3)
+
+  team Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([teamId, userId])
+  @@index([userId])
+  @@map("team_members")
+}
+
+model ResourceCategory {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String   @unique
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  resources Resource[]
+
+  @@map("resource_categories")
+}
+
+model Resource {
+  id               String         @id @default(uuid()) @db.Uuid
+  categoryId       String         @map("category_id") @db.Uuid
+  name             String         @unique
+  description      String?
+  location         String?
+  // Number of people the resource holds; null where it does not apply (e.g. a projector).
+  capacity         Int?
+  status           ResourceStatus @default(ACTIVE)
+  // When true, new reservations start as PENDING until an admin reviews them.
+  requiresApproval Boolean        @default(false) @map("requires_approval")
+  createdAt        DateTime       @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt        DateTime       @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  category     ResourceCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  reservations Reservation[]
+
+  @@index([categoryId])
+  @@index([status])
+  @@map("resources")
+}
+
+model Reservation {
+  id                 String            @id @default(uuid()) @db.Uuid
+  resourceId         String            @map("resource_id") @db.Uuid
+  // The person who made the reservation and is accountable for it.
+  userId             String            @map("user_id") @db.Uuid
+  // Set when the reservation is made on behalf of a team.
+  teamId             String?           @map("team_id") @db.Uuid
+  title              String
+  notes              String?
+  // The slot is half-open: [startsAt, endsAt). A booking ending at 10:00 does not
+  // clash with one starting at 10:00.
+  startsAt           DateTime          @map("starts_at") @db.Timestamptz(3)
+  endsAt             DateTime          @map("ends_at") @db.Timestamptz(3)
+  status             ReservationStatus @default(CONFIRMED)
+  reviewedById       String?           @map("reviewed_by_id") @db.Uuid
+  reviewedAt         DateTime?         @map("reviewed_at") @db.Timestamptz(3)
+  reviewNote         String?           @map("review_note")
+  cancelledAt        DateTime?         @map("cancelled_at") @db.Timestamptz(3)
+  cancellationReason String?           @map("cancellation_reason")
+  createdAt          DateTime          @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime          @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  // Resources and users with reservations cannot be deleted (retire / deactivate
+  // them instead), so usage history is never lost.
+  resource   Resource @relation(fields: [resourceId], references: [id], onDelete: Restrict)
+  user       User     @relation("ReservationRequester", fields: [userId], references: [id], onDelete: Restrict)
+  team       Team?    @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  reviewedBy User?    @relation("ReservationReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+
+  @@index([resourceId, startsAt])
+  @@index([userId, startsAt])
+  @@index([teamId])
+  @@index([status, startsAt])
+  @@map("reservations")
+}
